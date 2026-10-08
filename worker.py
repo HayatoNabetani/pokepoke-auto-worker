@@ -13,6 +13,7 @@ from PIL import Image
 
 from iphone import request, SESSION_FILE
 from observe import observe, ROOT
+from exploration import ExpansionCatalog
 
 
 def normalized(text):
@@ -56,6 +57,16 @@ class Worker:
         self.result_recorded = False
         self.reward_recorded = False
         self.series_initialized = False
+        self.series_needs_selection = False
+        self.expansion_catalog = ExpansionCatalog()
+        self.exploration_actions = 0
+        self.difficulty_fingerprint = None
+        self.difficulty_stalls = 0
+        self.expansion_read_failures = 0
+        self.difficulty_read_failures = 0
+        self.series_order = []
+        self.deck_read_failures = 0
+        self.unresolved_rewards = set()
         (ROOT / 'logs').mkdir(exist_ok=True)
 
     def log(self, event, **values):
@@ -103,6 +114,18 @@ class Worker:
                                  int(width * .95), int(height * bottom)))
         return reward_color_fraction(crop)
 
+    def series_tabs(self):
+        return sorted({normalized(r['text']) for r in self.rows
+                       if r['y'] > .8 and normalized(r['text']).endswith('シリーズ')})
+
+    def difficulty_rows(self):
+        # Difficulty names are labels in the right-hand badge of each card.
+        # Read the labels rather than assuming a fixed number or list of names.
+        return sorted((r for r in self.rows if .62 < r['x'] < .9 and .2 < r['y'] < .85
+                       and '/' not in normalized(r['text'])
+                       and any(c.isalpha() for c in normalized(r['text']))),
+                      key=lambda r: r['y'])
+
     def step(self):
         live_path = ROOT / 'logs' / 'current.png'
         self.rows = observe(live_path)
@@ -143,7 +166,7 @@ class Worker:
             return 8
 
         if self.limit and not self.in_battle and self.battles >= self.limit:
-            if self.find('エキスパンション') and self.find('ステップアップバトル'):
+            if self.find('エキスパンション') and self.find('ステップアップ'):
                 self.log('battle_limit_reached')
                 self.running = False
                 return 0
@@ -173,50 +196,80 @@ class Worker:
             self.result_recorded = False
             self.reward_recorded = False
             self.log('battle_started', count=self.battles, selected=self.selected)
+            self.exploration_actions = 0
             return 8
 
         if self.find('エキスパンション選択'):
+            tabs = self.series_tabs()
+            if not tabs:
+                return 3
+            self.series_order = sorted(set(self.series_order) | set(tabs))
             if not self.series_initialized:
                 self.series_initialized = True
-                self.expansion_series = 'Aシリーズ'
+                self.expansion_series = self.series_order[0]
                 self.exhausted_series.clear()
                 self.expansion_fingerprint = None
                 self.expansion_stalls = 0
-                if self.find('Aシリーズ'):
-                    self.tap_text(self.find('Aシリーズ'), 'Aシリーズから未クリアを探す')
+                if self.find(self.expansion_series):
+                    self.tap_text(self.find(self.expansion_series), self.expansion_series + 'から未クリアを探す')
                     return 2
+            if self.series_needs_selection:
+                tab = self.find(self.expansion_series)
+                if not tab:
+                    raise RuntimeError('探索中のシリーズのタブを読めないため停止しました。')
+                self.series_needs_selection = False
+                self.tap_text(tab, self.expansion_series + 'の探索を再開')
+                return 2
+            header = self.find('エキスパンション選択')
+            min_count_y = header['y'] + header.get('height', .03) / 2 + .13
             counts = [r for r in self.rows if re.fullmatch(r'\d+/\d+', normalized(r['text']))
-                      and .38 < r['x'] < .6 and .4 < r['y'] < .81]
+                      and .38 < r['x'] < .6 and min_count_y < r['y'] < .81]
+            if not counts and not self.find('ありません', ymin=.2, ymax=.8):
+                self.expansion_read_failures += 1
+                if self.expansion_read_failures >= 3:
+                    raise RuntimeError('エキスパンション一覧の件数を読めないため停止しました。未受領なしとは判定していません。')
+                return 3
+            self.expansion_read_failures = 0
+            visible_keys = []
             for row in sorted(counts, key=lambda r: r['y']):
                 done, total = map(int, normalized(row['text']).split('/'))
-                key = (self.difficulty, self.expansion_series, self.expansion_signature(row))
+                identity = self.expansion_catalog.identify(self.screen, row, self.expansion_series, total)
+                key = (self.difficulty, self.expansion_series, identity)
+                visible_keys.append(key)
                 if done < total and key not in self.exhausted_expansions:
                     self.expansion = key
                     self.tap(.5, row['y'] - .07, '未クリアを含むエキスパンション')
                     self.list_fingerprint = None
                     self.list_stalls = 0
                     self.expansion_stalls = 0
+                    self.log('expansion_selected', difficulty=self.difficulty,
+                             series=self.expansion_series, identity=identity)
                     return 2
-            fingerprint = tuple(normalized(r['text']) for r in counts)
+            fingerprint = tuple(visible_keys)
             self.expansion_stalls = self.expansion_stalls + 1 if fingerprint == self.expansion_fingerprint else 0
             self.expansion_fingerprint = fingerprint
             if self.expansion_stalls >= 2:
                 self.exhausted_series.add(self.expansion_series)
-                other = 'Bシリーズ' if self.expansion_series == 'Aシリーズ' else 'Aシリーズ'
-                if other not in self.exhausted_series and self.find(other):
+                other = next((name for name in self.series_order if name not in self.exhausted_series), None)
+                if other and self.find(other):
                     self.tap_text(self.find(other), '別シリーズを探す')
                     self.expansion_series = other
                     self.expansion_stalls = 0
+                    self.expansion_fingerprint = None
+                    self.log('series_changed', difficulty=self.difficulty, series=other)
+                elif other:
+                    raise RuntimeError('未探索シリーズのタブを読めないため停止しました。')
                 else:
                     self.exhausted_difficulties.add(self.difficulty)
                     self.pending_dismiss = True
                     self.series_initialized = False
+                    self.log('difficulty_exhausted', difficulty=self.difficulty)
                     self.tap(.5, .915, 'エキスパンション選択を閉じる')
             else:
                 self.swipe()
             return 2
 
-        if self.find('ステップアップバトル') and self.find('エキスパンション'):
+        if self.find('ステップアップ') and self.find('エキスパンション'):
             if self.pending_dismiss:
                 self.pending_dismiss = False
                 self.exhausted_series.clear()
@@ -224,6 +277,12 @@ class Worker:
                 return 2
             decks = [r for r in self.rows if 'デッキ' in normalized(r['text'])
                      and r['x'] > .35 and .36 < r['y'] < .72]
+            if not decks:
+                self.deck_read_failures += 1
+                if self.deck_read_failures >= 3:
+                    raise RuntimeError('バトル一覧を読めないため停止しました。未受領なしとは判定していません。')
+                return 3
+            self.deck_read_failures = 0
             for row in sorted(decks, key=lambda r: r['y']):
                 score = self.reward_color(row)
                 key = str((self.difficulty, self.expansion, normalized(row['text'])))
@@ -238,26 +297,49 @@ class Worker:
             if self.list_stalls >= 2:
                 if self.expansion:
                     self.exhausted_expansions.add(self.expansion)
+                    self.log('expansion_exhausted', expansion=self.expansion)
                 row = self.find('エキスパンション')
-                self.series_initialized = False
+                self.series_needs_selection = self.series_initialized
                 self.tap_text(row, '別エキスパンションを探す')
                 self.list_stalls = 0
             else:
                 self.swipe()
             return 2
 
-        if self.find('ひとりで') and self.find('ステップアップバトル', ymin=.55):
-            self.tap_text(self.find('ステップアップバトル', ymin=.55), 'ステップアップバトルへ')
+        if self.find('ひとりで') and self.find('ステップアップ', ymin=.55):
+            self.tap_text(self.find('ステップアップ', ymin=.55), 'ステップアップバトルへ')
             return 2
 
-        if self.find('ステップアップバトル'):
-            for difficulty in ('初級', '中級', '上級', 'エキスパート'):
-                row = self.find(difficulty, ymin=.2, ymax=.85)
-                if row and difficulty not in self.exhausted_difficulties:
+        if self.find('ステップアップ'):
+            visible = []
+            rows = self.difficulty_rows()
+            if not rows:
+                self.difficulty_read_failures += 1
+                if self.difficulty_read_failures >= 3:
+                    raise RuntimeError('難易度一覧を読めないため停止しました。探索完了とは判定していません。')
+                return 3
+            self.difficulty_read_failures = 0
+            for row in rows:
+                difficulty = normalized(row['text'])
+                visible.append(difficulty)
+                if difficulty not in self.exhausted_difficulties:
                     self.difficulty = difficulty
+                    self.series_initialized = False
+                    self.series_needs_selection = False
+                    self.expansion = None
+                    self.exploration_actions = 0
+                    self.difficulty_stalls = 0
+                    self.difficulty_fingerprint = None
+                    self.series_order = []
+                    self.log('difficulty_selected', difficulty=difficulty)
                     self.tap_text(row, '難易度を選択')
                     return 2
-            if len(self.exhausted_difficulties) >= 4:
+            fingerprint = tuple(visible)
+            self.difficulty_stalls = self.difficulty_stalls + 1 if fingerprint == self.difficulty_fingerprint else 0
+            self.difficulty_fingerprint = fingerprint
+            if visible and self.difficulty_stalls >= 2:
+                if self.unresolved_rewards:
+                    raise RuntimeError('再挑戦しても勝てないバトルが残っています。報酬の全受領とは判定していません。')
                 self.log('no_unclaimed_battles_found')
                 self.running = False
                 return 0
@@ -265,7 +347,7 @@ class Worker:
             return 2
 
         solo = self.find('ひとりで', ymin=.55)
-        stepup = self.find('ステップアップバトル', ymin=.55)
+        stepup = self.find('ステップアップ', ymin=.55)
         if stepup:
             self.tap_text(stepup, 'ステップアップバトルへ')
             return 2
@@ -295,6 +377,8 @@ class Worker:
                     self.wins += 1
                 elif self.selected:
                     self.failed[self.selected] = self.failed.get(self.selected, 0) + 1
+                    if self.failed[self.selected] >= 2:
+                        self.unresolved_rewards.add(self.selected)
                 self.log('battle_result', outcome='win' if victory else 'loss', selected=self.selected)
             self.tap_text(advance, '対戦結果の続きへ')
             return 2
@@ -303,6 +387,7 @@ class Worker:
             self.in_battle = False
             if self.find('初回報酬') and not self.reward_recorded:
                 self.reward_recorded = True
+                self.unresolved_rewards.discard(self.selected)
                 self.log('first_reward_received', selected=self.selected)
                 self.screen.save(ROOT / 'logs' / f'reward-{self.battles}.png')
             self.tap_text(next_button, '報酬を受け取って一覧へ')
@@ -316,19 +401,15 @@ class Worker:
                 return 2
         return None
 
-    def expansion_signature(self, row):
-        width, height = self.screen.size
-        crop = self.screen.crop((int(width * .14), int(height * (row['y'] - .115)),
-                                 int(width * .45), int(height * (row['y'] - .035))))
-        values = np.asarray(crop.convert('L').resize((12, 12)), dtype=float)
-        bits = values > np.median(values)
-        return np.packbits(bits).tobytes().hex()
-
     def run(self):
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'running', False))
         self.log('worker_started', limit=self.limit)
         try:
             while self.running:
+                if not self.in_battle and self.exploration_actions >= 200:
+                    raise RuntimeError('探索が進まないため停止しました。ログとscreen.pngを確認してください。')
+                if not self.in_battle:
+                    self.exploration_actions += 1
                 time.sleep(self.step())
         except KeyboardInterrupt:
             self.log('stopped_by_user')
