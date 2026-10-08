@@ -200,6 +200,12 @@ class ExplorationTests(unittest.TestCase):
             w.step()
         self.assertFalse(w.exhausted_expansions)
 
+    def test_interrupted_battle_can_resume_after_restart(self):
+        self.rows = [self.row('中断されたバトルがあります', y=.4),
+                     self.row('はい', x=.7, y=.6)]
+        self.worker.step()
+        self.worker.tap.assert_called_with(.7, .6, '中断された対戦を再開')
+
     def test_unwinnable_battle_prevents_successful_completion(self):
         w = self.worker
         w.unresolved_rewards.add('負けたデッキ')

@@ -154,6 +154,12 @@ class Worker:
             self.tap_text(start, 'スタート')
             return 3
 
+        if self.find('中断されたバトル'):
+            resume = self.find('はい', exact=True)
+            if resume:
+                self.tap_text(resume, '中断された対戦を再開')
+                return 3
+
         # Results and rewards are handled here once their observed labels are known.
         finish = self.handle_result()
         if finish is not None:
