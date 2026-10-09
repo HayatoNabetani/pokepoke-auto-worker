@@ -11,6 +11,7 @@ node_modules/
 config.local.sh
 .env
 .env.*
+!.env.example
 *.log
 *.xcresult/
 *.mobileprovision

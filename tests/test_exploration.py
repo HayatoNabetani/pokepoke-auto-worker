@@ -41,6 +41,7 @@ class ExplorationTests(unittest.TestCase):
         patch('worker.ROOT', root).start()
         patch('worker.SESSION_FILE', Mock(read_text=Mock(return_value='test'))).start()
         patch('worker.request', return_value={'value': {'bundleId': 'jp.pokemon.pokemontcgp'}}).start()
+        patch('worker.Device', return_value=Mock(unlock=Mock(return_value=False))).start()
         self.worker = Worker(0, 900)
         self.worker.tap = Mock()
         self.worker.swipe = Mock()
@@ -205,6 +206,17 @@ class ExplorationTests(unittest.TestCase):
                      self.row('はい', x=.7, y=.6)]
         self.worker.step()
         self.worker.tap.assert_called_with(.7, .6, '中断された対戦を再開')
+
+    def test_pack_details_can_reach_battle_menu(self):
+        self.rows = [self.row('提供割合', y=.85), self.row('他の拡張パック', y=.85)]
+        self.worker.step()
+        self.worker.tap.assert_called_with(278 / 402, 814 / 874, 'パック詳細から下部のバトルメニューへ')
+
+    def test_locked_device_is_prepared_before_screenshot(self):
+        self.worker.device.unlock.return_value = True
+        self.worker.step()
+        self.worker.device.activate.assert_called_once()
+        self.assertIsNone(self.worker.screen)
 
     def test_unwinnable_battle_prevents_successful_completion(self):
         w = self.worker

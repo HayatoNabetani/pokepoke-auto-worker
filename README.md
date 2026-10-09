@@ -11,9 +11,39 @@ cd pokepoke-auto-worker
 bash start.sh
 ```
 
-起動前にiPhoneをMacにUSB接続し、ロックを解除してください。
+起動前にiPhoneをMacにUSB接続してください。
 Macの「このコンピュータを信頼」や、iPhoneのUI自動操作の許可が求められた場合は許可します。
 実行中はiPhoneの画面を点けたままにし、ポケポケを前面にしてください。
+起動時はポケポケを自動で前面にします。パック詳細画面からもバトルメニューに進みます。
+
+Pythonと依存関係はuvで管理します。`bash start.sh` が `uv sync --locked` を実行し、
+`uv.lock` のバージョンで環境を揃えて起動します。
+[uvの公式ドキュメント](https://docs.astral.sh/uv/concepts/projects/sync/)も参照できます。
+
+## 自動でロック解除する
+
+プロジェクト直下の `.env` に次を設定します。数字4桁・6桁のパスコードに対応します。
+先頭の0もそのまま入力してください。
+
+```dotenv
+IPHONE_PASSCODE=あなたのパスコード
+```
+
+`.env` がない場合は `cp .env.example .env` で作れます。
+`bash start.sh` はuvの `--env-file .env` で読み込みます。
+パスコードはコマンド引数や操作ログに書き出しません。`.env` はGitから除外し、起動時に権限を600にします。
+パスコードを設定した場合、このスクリプトで起動するWebDriverAgentの詳細ログは保存しません。
+解除前の画面はキャプチャ・文字認識しません。
+
+解除できなかった場合は1回で停止し、再起動しても自動で再入力しません。
+iPhoneを手動で解除し、パスコード設定を確認してから起動してください。
+未設定の場合は、これまで通り手動で解除します。
+
+自動解除には、WebDriverAgentがiPhone上で動作している必要があります。
+iOSがロック中のWebDriverAgent起動やUSB通信を拒否した場合（端末再起動直後など）は、
+最初に手動で解除してください。英数字のパスコードには対応していません。
+
+## 探索と終了条件
 
 初回報酬が未受領のバトルが見つからなくなるまで続けます。
 オートONを確認して対戦を開始し、終了後は結果・報酬・新しいバトルの通知を処理して次を探します。
@@ -36,7 +66,7 @@ bash stop.sh
 ```
 
 停止すると次のバトルへの操作が止まります。進行中のゲーム内オート対戦は続きます。
-再開するときは、iPhoneのロックを解除して `bash start.sh` をもう一度実行してください。
+再開するときは `bash start.sh` をもう一度実行してください。中断された対戦は再開します。
 
 ## 回数や待ち時間を指定する
 
@@ -53,16 +83,17 @@ bash start.sh --battle-timeout 1200
 
 ## 初めて別のMacで設定する
 
-必要な環境はmacOS、Xcode、Node.js、Python 3、実機用にビルド・署名済みのWebDriverAgentです。
+必要な環境はmacOS、Xcode、Node.js、uv、実機用にビルド・署名済みのWebDriverAgentです。
+uvがなければ `brew install uv` などで導入してください。
 iPhoneでは開発者モードを有効にしてください。
 WebDriverAgentのビルド・署名は別途必要です。このプロジェクトは既存の `.xctestrun` を使います。
 
 ```bash
 git clone https://github.com/HayatoNabetani/pokepoke-auto-worker.git
 cd pokepoke-auto-worker
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+uv sync --locked
 cp config.example.sh config.local.sh
+cp .env.example .env
 ```
 
 `config.local.sh` を編集し、次を設定します。
@@ -72,7 +103,7 @@ cp config.example.sh config.local.sh
 | `IPHONE_UDID` | 操作する実機のUDID |
 | `WDA_TESTRUN` | ビルド済みWebDriverAgentの `.xctestrun` の絶対パス |
 | `IOS_DEVICE_MODULE` | インストール済み `appium-ios-device` の絶対パス |
-| `PYTHON_BIN` | 使用するPython。上記手順では `.venv/bin/python` |
+| `UV_BIN` | 使用するuv。通常は `uv`。旧 `PYTHON_BIN` 設定は使いません |
 | `NODE_BIN` | 使用するNode.js。通常は `node` |
 
 実機のUDIDは `xcrun xctrace list devices` などで確認できます。
@@ -82,7 +113,8 @@ cp config.example.sh config.local.sh
 
 ## 動かないとき
 
-- 接続待ちになる：USB接続・ロック解除・実機の開発者モードを確認し、`logs/wda.log` を確認します。
+- 接続待ちになる：USB接続・ロック解除・実機の開発者モードを確認します。パスコード未設定時は `logs/wda.log` も確認できます。
+- 自動解除が失敗する：繰り返し起動せず、手動で解除して `.env` の設定を確認します。
 - 未対応画面で停止する：`screen.png` と `logs/events.jsonl` を確認します。
 - 「既に実行中」と出る：先に `bash stop.sh` を実行します。
 - 強制終了後に実行中と表示される：`.runtime/worker.pid` のプロセスが終了していることを確認してから、`.runtime/run.lock` を削除します。
@@ -95,11 +127,11 @@ cp config.example.sh config.local.sh
 ## Gitに含めない情報
 
 端末識別子や環境固有のパスは `config.local.sh` に保存します。
-このファイル、セッションID、画面キャプチャ、ログ、実行状態、仮想環境、署名用ファイルは `.gitignore` で除外します。
+このファイル、`.env`、セッションID、画面キャプチャ、ログ、実行状態、仮想環境、署名用ファイルは `.gitignore` で除外します。
 テストに含める画像は報酬アイコンやエキスパンションのロゴ周辺だけを切り出したもので、アカウント情報は含みません。
 
 テストは次のコマンドで実行できます。
 
 ```bash
-python3 -m unittest discover -s tests -v
+uv run --locked python -m unittest discover -s tests -v
 ```

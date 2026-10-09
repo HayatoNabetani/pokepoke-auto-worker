@@ -14,6 +14,7 @@ from PIL import Image
 from iphone import request, SESSION_FILE
 from observe import observe, ROOT
 from exploration import ExpansionCatalog
+from device import Device
 
 
 def normalized(text):
@@ -33,6 +34,7 @@ class Worker:
         self.timeout = timeout
         self.session = SESSION_FILE.read_text().strip()
         self.prefix = '/session/' + self.session
+        self.device = Device(self.session)
         self.running = True
         self.battles = 0
         self.wins = 0
@@ -127,6 +129,10 @@ class Worker:
                       key=lambda r: r['y'])
 
     def step(self):
+        if self.device.unlock():
+            self.device.activate()
+            self.log('device_unlocked')
+            return 3
         live_path = ROOT / 'logs' / 'current.png'
         self.rows = observe(live_path)
         self.screen = Image.open(live_path).copy()
@@ -362,6 +368,9 @@ class Worker:
             return 2
         if self.find('ゲットチャレンジ') and self.find('ショップ'):
             self.tap(278 / 402, 814 / 874, '下部のバトルメニュー')
+            return 2
+        if self.find('提供割合', ymin=.8) and self.find('他の拡張パック', ymin=.8):
+            self.tap(278 / 402, 814 / 874, 'パック詳細から下部のバトルメニューへ')
             return 2
 
         if self.unknown_since is None:

@@ -4,6 +4,6 @@ export IPHONE_UDID=""
 export WDA_TESTRUN=""  # ビルド済みWebDriverAgentの.xctestrunファイル
 export IOS_DEVICE_MODULE="$HOME/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-ios-device"
 
-# Python仮想環境を使う場合。既存環境を使う場合はpython3に変更できます。
-export PYTHON_BIN="$PWD/.venv/bin/python"
+# Pythonと依存関係はuvで管理します。
+export UV_BIN="uv"
 export NODE_BIN="node"

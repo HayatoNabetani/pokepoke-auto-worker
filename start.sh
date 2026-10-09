@@ -9,7 +9,17 @@ fi
 : "${IPHONE_UDID:?config.local.shにIPHONE_UDIDを設定してください。}"
 export IPHONE_UDID
 NODE_BIN="${NODE_BIN:-node}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+UV_BIN="${UV_BIN:-uv}"
+if ! command -v "$UV_BIN" >/dev/null 2>&1; then
+  echo "uvをインストールしてください。README.mdを確認してください。" >&2
+  exit 1
+fi
+uv_args=(run --locked)
+if [ -f .env ]; then
+  chmod 600 .env
+  uv_args+=(--env-file .env)
+fi
+run_python() { "$UV_BIN" "${uv_args[@]}" python "$@"; }
 WDA_TESTRUN="${WDA_TESTRUN:-}"
 if ! mkdir .runtime/run.lock 2>/dev/null; then
   echo "自動操作は既に実行中です。.runtime/worker.pidを確認してください。" >&2
@@ -26,6 +36,12 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+"$UV_BIN" sync --locked
+wda_log="logs/wda.log"
+if [ "$(run_python -c 'import os; print(int(bool(os.getenv("IPHONE_PASSCODE"))))')" = 1 ]; then
+  # XCTest logs taps, so discard low-level logs when unlocking is configured.
+  wda_log="/dev/null"
+fi
 if [ ! -x "$POKEPOKE_OCR" ] || [ ocr.swift -nt "$POKEPOKE_OCR" ]; then
   xcrun swiftc -module-cache-path "$PWD/.runtime/swift-cache" ocr.swift -o "$POKEPOKE_OCR"
 fi
@@ -39,7 +55,7 @@ if ! curl --max-time 3 -fsS http://127.0.0.1:8100/status >/dev/null 2>&1; then
   xcodebuild test-without-building -xctestrun "$WDA_TESTRUN" \
     -destination "id=$IPHONE_UDID" \
     -resultBundlePath "$PWD/logs/wda-$(date +%Y%m%d-%H%M%S).xcresult" \
-    >logs/wda.log 2>&1 &
+    >"$wda_log" 2>&1 &
   wda_pid=$!
   ready=0
   for attempt in $(seq 1 60); do
@@ -58,17 +74,5 @@ if ! curl --max-time 3 -fsS http://127.0.0.1:8100/status >/dev/null 2>&1; then
     exit 1
   fi
 fi
-if ! "$PYTHON_BIN" - <<'PY'
-from iphone import SESSION_FILE, request
-try:
-    session = SESSION_FILE.read_text().strip()
-    result = request('GET', '/session/' + session + '/wda/activeAppInfo')
-    if not result.get('value', {}).get('bundleId'):
-        raise RuntimeError('No active app')
-except Exception:
-    raise SystemExit(1)
-PY
-then
-  "$PYTHON_BIN" iphone.py session
-fi
-"$PYTHON_BIN" worker.py "$@"
+run_python device.py
+run_python worker.py "$@"
