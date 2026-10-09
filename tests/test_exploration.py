@@ -203,6 +203,32 @@ class ExplorationTests(unittest.TestCase):
             w.step()
         self.assertFalse(w.exhausted_expansions)
 
+    def test_real_empty_battle_screen_is_saved_and_moves_to_next_expansion(self):
+        w = self.worker
+        identity = w.expansion_catalog.identify(screen_with_logo('expansion-ex'), {'y': .60}, 'Aシリーズ', 30)
+        key = ('初級', 'Aシリーズ', identity)
+        w.expansion = key
+        w.series_initialized = True
+        w.observed_counts[identity] = 5
+        self.rows = json.loads((FIXTURES / 'empty-battle-list.json').read_text())
+        w.step()
+        self.assertIn(key, w.exhausted_expansions)
+        self.assertFalse(w.exhausted_difficulties)
+        self.assertTrue(w.running)
+        w.tap.assert_called_once_with(.8328075691640378, .3299318823476858,
+                                      'この難易度のバトルがないため別エキスパンションを探す')
+        self.assertFalse(w.deck_read_failures)
+        restarted = self.restarted()
+        self.assertIn(key, restarted.exhausted_expansions)
+        self.assertEqual(restarted.exhausted_counts[key], 5)
+
+    def test_unrelated_empty_message_is_not_taken_as_empty_battle_list(self):
+        self.rows = [self.row('ステップアップバトル'), self.row('エキスパンション'),
+                     self.row('報酬はありません')]
+        self.worker.step()
+        self.assertFalse(self.worker.exhausted_expansions)
+        self.worker.tap.assert_not_called()
+
     def test_interrupted_battle_can_resume_after_restart(self):
         self.rows = [self.row('中断されたバトルがあります', y=.4),
                      self.row('はい', x=.7, y=.6)]

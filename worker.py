@@ -214,6 +214,18 @@ class Worker:
         return sorted({normalized(r['text']) for r in self.rows
                        if r['y'] > .8 and normalized(r['text']).endswith('シリーズ')})
 
+    def finish_expansion(self, reason='別エキスパンションを探す'):
+        if self.expansion:
+            self.exhausted_expansions.add(self.expansion)
+            identity = self.expansion[2]
+            if identity in self.observed_counts:
+                self.exhausted_counts[self.expansion] = self.observed_counts[identity]
+            self.log('expansion_exhausted', expansion=self.expansion, reason=reason)
+        self.series_needs_selection = self.series_initialized
+        self.tap_text(self.find('エキスパンション'), reason)
+        self.list_stalls = 0
+        self.deck_read_failures = 0
+
     def difficulty_rows(self):
         # Difficulty names are labels in the right-hand badge of each card.
         # Read the labels rather than assuming a fixed number or list of names.
@@ -410,6 +422,9 @@ class Worker:
                 self.exhausted_series.clear()
                 self.tap(.5, .855, '別の難易度へ戻る')
                 return 2
+            if self.find('この難易度のバトルはありません', ymin=.36, ymax=.8):
+                self.finish_expansion('この難易度のバトルがないため別エキスパンションを探す')
+                return 2
             decks = [r for r in self.rows if 'デッキ' in normalized(r['text'])
                      and r['x'] > .35 and .36 < r['y'] < .72]
             if not decks:
@@ -430,16 +445,7 @@ class Worker:
             self.list_stalls = self.list_stalls + 1 if fingerprint == self.list_fingerprint else 0
             self.list_fingerprint = fingerprint
             if self.list_stalls >= 2:
-                if self.expansion:
-                    self.exhausted_expansions.add(self.expansion)
-                    identity = self.expansion[2]
-                    if identity in self.observed_counts:
-                        self.exhausted_counts[self.expansion] = self.observed_counts[identity]
-                    self.log('expansion_exhausted', expansion=self.expansion)
-                row = self.find('エキスパンション')
-                self.series_needs_selection = self.series_initialized
-                self.tap_text(row, '別エキスパンションを探す')
-                self.list_stalls = 0
+                self.finish_expansion()
             else:
                 self.swipe()
             return 2
