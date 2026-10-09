@@ -1,10 +1,30 @@
 """Recognize expansion logos despite small OCR/scroll position differences."""
+import base64
+
 import numpy as np
 
 
 class ExpansionCatalog:
     def __init__(self):
         self.entries = []
+
+    def export(self):
+        return [{'series': entry['series'], 'total': entry['total'],
+                 'height': entry['template'].shape[0],
+                 'pixels': base64.b64encode(entry['template'].astype(np.uint8).tobytes()).decode('ascii')}
+                for entry in self.entries]
+
+    def restore(self, entries):
+        restored = []
+        for entry in entries:
+            if (not isinstance(entry['series'], str) or not isinstance(entry['total'], int)
+                    or entry['total'] < 1 or not isinstance(entry['height'], int)
+                    or not 1 <= entry['height'] <= 200):
+                raise ValueError('Invalid expansion catalog')
+            pixels = base64.b64decode(entry['pixels'], validate=True)
+            template = np.frombuffer(pixels, dtype=np.uint8).reshape(entry['height'], 120).astype(float)
+            restored.append({'series': entry['series'], 'total': entry['total'], 'template': template})
+        self.entries = restored
 
     @staticmethod
     def crop(screen, row, padding=0):

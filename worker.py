@@ -15,6 +15,7 @@ from iphone import request, SESSION_FILE
 from observe import observe, ROOT
 from exploration import ExpansionCatalog
 from device import Device
+from progress import ProgressFile
 
 
 def normalized(text):
@@ -29,7 +30,7 @@ def reward_color_fraction(image):
 
 
 class Worker:
-    def __init__(self, limit, timeout):
+    def __init__(self, limit, timeout, reset_progress=False):
         self.limit = limit
         self.timeout = timeout
         self.session = SESSION_FILE.read_text().strip()
@@ -49,6 +50,8 @@ class Worker:
         self.list_stalls = 0
         self.expansion = None
         self.exhausted_expansions = set()
+        self.exhausted_counts = {}
+        self.observed_counts = {}
         self.difficulty = '初級'
         self.exhausted_difficulties = set()
         self.pending_dismiss = False
@@ -69,7 +72,98 @@ class Worker:
         self.series_order = []
         self.deck_read_failures = 0
         self.unresolved_rewards = set()
+        self.claimed_rewards = set()
+        self.status = 'running'
+        self.previous_battles = 0
+        self.previous_wins = 0
+        self.new_battles = 0
+        self.resume_battle = False
+        self.resume_difficulty = None
+        self.resume_series = None
+        self.resume_fingerprint = None
+        self.resume_stalls = 0
+        self.resume_navigation_needed = False
+        self.needs_expansion_alignment = False
+        self.restart_difficulty_scan = False
+        self.top_fingerprint = None
+        self.top_stalls = 0
         (ROOT / 'logs').mkdir(exist_ok=True)
+        self.progress = ProgressFile(ROOT / '.runtime' / 'progress.json')
+        if reset_progress:
+            self.progress.reset()
+        self.restore_progress()
+
+    def restore_progress(self):
+        data = self.progress.load()
+        if data is None:
+            return
+        try:
+            self.expansion_catalog.restore(data['catalog'])
+            keys = data['exhausted_expansions']
+            for key in keys:
+                if (len(key) != 3 or not all(isinstance(v, str) for v in key[:2])
+                        or not isinstance(key[2], int) or not 0 <= key[2] < len(self.expansion_catalog.entries)):
+                    raise ValueError('Invalid expansion key')
+            self.exhausted_expansions = {tuple(key) for key in keys}
+            for record in data.get('exhausted_counts', []):
+                key = tuple(record['key'])
+                if key not in self.exhausted_expansions or not isinstance(record['done'], int) or record['done'] < 0:
+                    raise ValueError('Invalid expansion count')
+                self.exhausted_counts[key] = record['done']
+            for name in ('failed', 'claimed_rewards', 'unresolved_rewards'):
+                value = data[name]
+                if name == 'failed':
+                    if not isinstance(value, dict) or any(not isinstance(k, str) or not isinstance(v, int) or v < 0 for k, v in value.items()):
+                        raise ValueError('Invalid failures')
+                    self.failed = value
+                else:
+                    if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+                        raise ValueError('Invalid rewards')
+                    setattr(self, name, set(value))
+            cursor = data['cursor']
+            self.resume_difficulty = cursor['difficulty']
+            self.resume_series = cursor['series']
+            if not isinstance(self.resume_difficulty, str) or not isinstance(self.resume_series, str):
+                raise ValueError('Invalid cursor')
+            self.difficulty = self.resume_difficulty
+            self.expansion_series = self.resume_series
+            self.selected = cursor.get('battle')
+            if self.selected is not None and not isinstance(self.selected, str):
+                raise ValueError('Invalid battle')
+            self.result_recorded = bool(data.get('result_recorded'))
+            self.reward_recorded = bool(data.get('reward_recorded'))
+            self.resume_battle = bool(data.get('in_battle')) and not self.result_recorded
+            self.previous_battles = data['total_battles']
+            self.previous_wins = data['total_wins']
+            if any(not isinstance(v, int) or v < 0 for v in (self.previous_battles, self.previous_wins)):
+                raise ValueError('Invalid totals')
+            # Revisit difficulty/series lists to discover additions. Only stable
+            # expansion identities are skipped across runs.
+            self.resume_navigation_needed = True
+            self.log('progress_loaded', difficulty=self.resume_difficulty,
+                     series=self.resume_series, expansions=len(self.exhausted_expansions))
+        except (KeyError, ValueError, TypeError, IndexError):
+            raise RuntimeError('進捗ファイルの内容が不正です。元のファイルは保持しています。--reset-progress で再探索できます。') from None
+
+    def save_progress(self):
+        self.progress.save({
+            'status': self.status,
+            'cursor': {'difficulty': self.difficulty, 'series': self.expansion_series,
+                       'expansion': self.expansion, 'battle': self.selected},
+            'exhausted_expansions': sorted(self.exhausted_expansions),
+            'exhausted_counts': [{'key': key, 'done': done}
+                                 for key, done in sorted(self.exhausted_counts.items())
+                                 if key in self.exhausted_expansions],
+            'exhausted_difficulties': sorted(self.exhausted_difficulties),
+            'exhausted_series': sorted(self.exhausted_series),
+            'failed': self.failed, 'claimed_rewards': sorted(self.claimed_rewards),
+            'unresolved_rewards': sorted(self.unresolved_rewards),
+            'total_battles': self.previous_battles + self.new_battles,
+            'total_wins': self.previous_wins + self.wins,
+            'in_battle': self.in_battle or self.resume_battle,
+            'result_recorded': self.result_recorded, 'reward_recorded': self.reward_recorded,
+            'catalog': self.expansion_catalog.export(),
+        })
 
     def log(self, event, **values):
         entry = {'time': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'event': event, **values}
@@ -93,14 +187,14 @@ class Worker:
     def tap_text(self, row, reason):
         self.tap(row['x'], row['y'], reason)
 
-    def swipe(self):
+    def swipe(self, reverse=False):
         request('POST', self.prefix + '/actions', {'actions': [{
             'type': 'pointer', 'id': 'finger', 'parameters': {'pointerType': 'touch'},
             'actions': [
-                {'type': 'pointerMove', 'duration': 0, 'x': 280, 'y': 680},
+                {'type': 'pointerMove', 'duration': 0, 'x': 280, 'y': 360 if reverse else 680},
                 {'type': 'pointerDown', 'button': 0},
                 {'type': 'pause', 'duration': 100},
-                {'type': 'pointerMove', 'duration': 650, 'x': 280, 'y': 360},
+                {'type': 'pointerMove', 'duration': 650, 'x': 280, 'y': 680 if reverse else 360},
                 {'type': 'pointerUp', 'button': 0}]}]})
         time.sleep(2)
 
@@ -129,6 +223,12 @@ class Worker:
                       key=lambda r: r['y'])
 
     def step(self):
+        try:
+            return self.step_screen()
+        finally:
+            self.save_progress()
+
+    def step_screen(self):
         if self.device.unlock():
             self.device.activate()
             self.log('device_unlocked')
@@ -149,6 +249,9 @@ class Worker:
             if not self.in_battle:
                 self.in_battle = True
                 self.battles += 1
+                if not self.resume_battle:
+                    self.new_battles += 1
+                self.resume_battle = False
                 self.battle_since = time.monotonic()
                 self.log('battle_observed', selected=self.selected)
             if time.monotonic() - self.battle_since > self.timeout:
@@ -204,6 +307,8 @@ class Worker:
                 return 0
             self.tap_text(battle, 'オート対戦開始')
             self.battles += 1
+            self.new_battles += 1
+            self.resume_battle = False
             self.in_battle = True
             self.battle_since = time.monotonic()
             self.result_recorded = False
@@ -213,13 +318,17 @@ class Worker:
             return 8
 
         if self.find('エキスパンション選択'):
+            if self.resume_navigation_needed:
+                self.tap(.5, .915, '保存した難易度へ戻るため選択を閉じる')
+                return 2
             tabs = self.series_tabs()
             if not tabs:
                 return 3
             self.series_order = sorted(set(self.series_order) | set(tabs))
             if not self.series_initialized:
                 self.series_initialized = True
-                self.expansion_series = self.series_order[0]
+                self.expansion_series = self.resume_series if self.resume_series in tabs else self.series_order[0]
+                self.resume_series = None
                 self.exhausted_series.clear()
                 self.expansion_fingerprint = None
                 self.expansion_stalls = 0
@@ -248,6 +357,11 @@ class Worker:
                 done, total = map(int, normalized(row['text']).split('/'))
                 identity = self.expansion_catalog.identify(self.screen, row, self.expansion_series, total)
                 key = (self.difficulty, self.expansion_series, identity)
+                self.observed_counts[identity] = done
+                if key in self.exhausted_counts and self.exhausted_counts[key] != done:
+                    self.exhausted_expansions.discard(key)
+                    del self.exhausted_counts[key]
+                    self.log('expansion_progress_changed', expansion=key, done=done)
                 visible_keys.append(key)
                 if done < total and key not in self.exhausted_expansions:
                     self.expansion = key
@@ -283,6 +397,14 @@ class Worker:
             return 2
 
         if self.find('ステップアップ') and self.find('エキスパンション'):
+            if self.resume_navigation_needed:
+                self.resume_navigation_needed = False
+                self.tap(.5, .855, '保存した難易度から再開するため一覧へ戻る')
+                return 2
+            if self.needs_expansion_alignment:
+                self.needs_expansion_alignment = False
+                self.tap_text(self.find('エキスパンション'), '探索するエキスパンションを確認')
+                return 2
             if self.pending_dismiss:
                 self.pending_dismiss = False
                 self.exhausted_series.clear()
@@ -299,7 +421,7 @@ class Worker:
             for row in sorted(decks, key=lambda r: r['y']):
                 score = self.reward_color(row)
                 key = str((self.difficulty, self.expansion, normalized(row['text'])))
-                if score > .035 and self.failed.get(key, 0) < 2:
+                if score > .035 and key not in self.claimed_rewards and self.failed.get(key, 0) < 2:
                     self.selected = key
                     self.log('unclaimed_reward_candidate', deck=row['text'], color_score=score)
                     self.tap_text(row, '初回報酬アイコンが残るバトル')
@@ -310,6 +432,9 @@ class Worker:
             if self.list_stalls >= 2:
                 if self.expansion:
                     self.exhausted_expansions.add(self.expansion)
+                    identity = self.expansion[2]
+                    if identity in self.observed_counts:
+                        self.exhausted_counts[self.expansion] = self.observed_counts[identity]
                     self.log('expansion_exhausted', expansion=self.expansion)
                 row = self.find('エキスパンション')
                 self.series_needs_selection = self.series_initialized
@@ -332,6 +457,33 @@ class Worker:
                     raise RuntimeError('難易度一覧を読めないため停止しました。探索完了とは判定していません。')
                 return 3
             self.difficulty_read_failures = 0
+            if self.restart_difficulty_scan and not self.resume_difficulty:
+                fingerprint = tuple(normalized(r['text']) for r in rows)
+                self.top_stalls = self.top_stalls + 1 if fingerprint == self.top_fingerprint else 0
+                self.top_fingerprint = fingerprint
+                if self.top_stalls < 2:
+                    self.swipe(reverse=True)
+                    return 2
+                self.restart_difficulty_scan = False
+            if self.resume_difficulty:
+                target = next((r for r in rows if normalized(r['text']) == self.resume_difficulty), None)
+                if target:
+                    rows = [target]
+                    self.resume_difficulty = None
+                    self.resume_navigation_needed = False
+                    self.restart_difficulty_scan = True
+                else:
+                    fingerprint = tuple(normalized(r['text']) for r in rows)
+                    self.resume_stalls = self.resume_stalls + 1 if fingerprint == self.resume_fingerprint else 0
+                    self.resume_fingerprint = fingerprint
+                    if self.resume_stalls < 2:
+                        self.swipe()
+                        return 2
+                    self.log('resume_difficulty_unavailable', difficulty=self.resume_difficulty)
+                    self.resume_difficulty = None
+                    self.resume_series = None
+                    self.restart_difficulty_scan = True
+                    return 2
             for row in rows:
                 difficulty = normalized(row['text'])
                 visible.append(difficulty)
@@ -344,6 +496,7 @@ class Worker:
                     self.difficulty_stalls = 0
                     self.difficulty_fingerprint = None
                     self.series_order = []
+                    self.needs_expansion_alignment = True
                     self.log('difficulty_selected', difficulty=difficulty)
                     self.tap_text(row, '難易度を選択')
                     return 2
@@ -354,6 +507,7 @@ class Worker:
                 if self.unresolved_rewards:
                     raise RuntimeError('再挑戦しても勝てないバトルが残っています。報酬の全受領とは判定していません。')
                 self.log('no_unclaimed_battles_found')
+                self.status = 'complete'
                 self.running = False
                 return 0
             self.swipe()
@@ -389,6 +543,7 @@ class Worker:
             if not self.result_recorded:
                 self.result_recorded = True
                 self.in_battle = False
+                self.resume_battle = False
                 if victory:
                     self.wins += 1
                 elif self.selected:
@@ -404,6 +559,8 @@ class Worker:
             if self.find('初回報酬') and not self.reward_recorded:
                 self.reward_recorded = True
                 self.unresolved_rewards.discard(self.selected)
+                if self.selected:
+                    self.claimed_rewards.add(self.selected)
                 self.log('first_reward_received', selected=self.selected)
                 self.screen.save(ROOT / 'logs' / f'reward-{self.battles}.png')
             self.tap_text(next_button, '報酬を受け取って一覧へ')
@@ -430,9 +587,13 @@ class Worker:
         except KeyboardInterrupt:
             self.log('stopped_by_user')
         except Exception as error:
+            self.status = 'error'
             self.log('stopped_on_error', error=str(error))
             raise
         finally:
+            if self.status == 'running':
+                self.status = 'stopped'
+            self.save_progress()
             self.log('worker_finished', battles=self.battles, wins=self.wins)
 
 
@@ -441,7 +602,9 @@ if __name__ == '__main__':
     parser.add_argument('--max-battles', type=int, default=0,
                         help='0: 未受領のバトルがなくなるまで継続')
     parser.add_argument('--battle-timeout', type=int, default=900)
+    parser.add_argument('--reset-progress', action='store_true',
+                        help='保存した探索記録を退避し、最初から探索する')
     args = parser.parse_args()
     if args.max_battles < 0 or args.battle_timeout < 1:
         parser.error('max-battles must be nonnegative; battle-timeout must be positive')
-    Worker(args.max_battles, args.battle_timeout).run()
+    Worker(args.max_battles, args.battle_timeout, args.reset_progress).run()
