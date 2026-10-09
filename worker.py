@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from iphone import request, SESSION_FILE
+from iphone import request, SESSION_FILE, WDAConnectionError
 from observe import observe, ROOT
 from exploration import ExpansionCatalog
 from device import Device
@@ -592,6 +592,10 @@ class Worker:
                 time.sleep(self.step())
         except KeyboardInterrupt:
             self.log('stopped_by_user')
+        except WDAConnectionError as error:
+            self.status = 'error'
+            self.log('stopped_on_connection_error', error=str(error))
+            return 1
         except Exception as error:
             self.status = 'error'
             self.log('stopped_on_error', error=str(error))
@@ -613,4 +617,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.max_battles < 0 or args.battle_timeout < 1:
         parser.error('max-battles must be nonnegative; battle-timeout must be positive')
-    Worker(args.max_battles, args.battle_timeout, args.reset_progress).run()
+    raise SystemExit(Worker(args.max_battles, args.battle_timeout, args.reset_progress).run() or 0)

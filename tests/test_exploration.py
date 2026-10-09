@@ -8,6 +8,7 @@ from PIL import Image
 
 from exploration import ExpansionCatalog
 from worker import Worker
+from iphone import WDAConnectionError
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 
@@ -403,6 +404,23 @@ class ExplorationTests(unittest.TestCase):
         self.assertNotIn(key, w.exhausted_expansions)
         self.assertEqual(w.expansion, key)
         w.tap.assert_called_once()
+
+    def test_connection_failure_keeps_progress_and_returns_nonzero(self):
+        w = self.worker
+        w.battles = w.new_battles = 15
+        w.wins = 14
+        w.selected = 'last battle'
+        w.step = Mock(side_effect=WDAConnectionError('接続が切れました'))
+        with patch('worker.signal.signal'):
+            self.assertEqual(w.run(), 1)
+        data = json.loads(w.progress.path.read_text())
+        self.assertEqual(data['status'], 'error')
+        self.assertEqual(data['total_battles'], 15)
+        self.assertEqual(data['total_wins'], 14)
+        self.assertEqual(data['cursor']['battle'], 'last battle')
+        restarted = self.restarted()
+        self.assertEqual(restarted.previous_battles, 15)
+        self.assertEqual(restarted.previous_wins, 14)
 
 
 if __name__ == '__main__':

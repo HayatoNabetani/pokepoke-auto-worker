@@ -4,11 +4,32 @@ import argparse
 import base64
 import json
 import os
+import http.client
+import time
 from pathlib import Path
 import urllib.request
+import urllib.error
 
 ROOT = Path(__file__).resolve().parent
 SESSION_FILE = ROOT / '.wda-session'
+
+
+class WDAConnectionError(ConnectionError):
+    """Transport failure; a write may already have reached the device."""
+
+
+def read_only_request(method, path):
+    return method == 'GET' or (method == 'POST' and path.endswith('/wda/apps/state'))
+
+
+def transport_failure(error):
+    # HTTP/WDA application errors are not a broken USB connection.
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    if isinstance(error, urllib.error.URLError):
+        error = error.reason
+    return isinstance(error, (http.client.RemoteDisconnected, http.client.IncompleteRead,
+                              ConnectionError, TimeoutError, OSError))
 
 
 def request(method, path, payload=None):
@@ -16,8 +37,26 @@ def request(method, path, payload=None):
     req = urllib.request.Request(os.getenv('WDA_URL', 'http://127.0.0.1:8100') + path,
                                  data=data, method=method,
                                  headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=45) as response:
-        result = json.load(response)
+    read_only = read_only_request(method, path)
+    attempts = 4 if read_only else 1
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=10 if read_only else 45) as response:
+                result = json.load(response)
+            break
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            if not transport_failure(error):
+                raise
+            if attempt + 1 == attempts:
+                message = ('WebDriverAgentへの読み取り通信が再試行後も復旧しませんでした。'
+                           if read_only else
+                           'WebDriverAgentへの操作の応答が途切れました。操作が届いた可能性があるため再送していません。')
+                raise WDAConnectionError(message + ' USB接続とWebDriverAgentを確認して再起動してください。進捗は保持します。') from None
+            delay = 2 ** attempt
+            # Never print request bodies, session identifiers or device secrets.
+            print(json.dumps({'event': 'wda_read_retry', 'attempt': attempt + 1,
+                              'delay_seconds': delay, 'error_type': type(error).__name__}), flush=True)
+            time.sleep(delay)
     if isinstance(result.get('value'), dict) and result['value'].get('error'):
         raise RuntimeError(json.dumps(result['value'], ensure_ascii=False))
     return result
