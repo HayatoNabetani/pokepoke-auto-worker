@@ -411,7 +411,7 @@ class ExplorationTests(unittest.TestCase):
         w.wins = 14
         w.selected = 'last battle'
         w.step = Mock(side_effect=WDAConnectionError('接続が切れました'))
-        with patch('worker.signal.signal'):
+        with patch('worker.signal.signal'), patch('worker.time.sleep'):
             self.assertEqual(w.run(), 1)
         data = json.loads(w.progress.path.read_text())
         self.assertEqual(data['status'], 'error')
@@ -421,6 +421,47 @@ class ExplorationTests(unittest.TestCase):
         restarted = self.restarted()
         self.assertEqual(restarted.previous_battles, 15)
         self.assertEqual(restarted.previous_wins, 14)
+
+    def test_lost_reward_tap_response_reads_new_list_without_replaying_tap(self):
+        w = self.worker
+        w.selected = 'saved reward battle'
+        w.result_recorded = True
+        self.rows = [self.row('次へ', y=.915), self.row('プレイヤー経験値'),
+                     self.row('初回報酬', y=.4)]
+
+        def lost_response(*args):
+            self.rows = [self.row('ステップアップバトル'), self.row('エキスパンション'),
+                         self.row('クリア済みデッキ', x=.66)]
+            raise WDAConnectionError('応答が途切れました')
+
+        w.tap.side_effect = lost_response
+        w.swipe.side_effect = lambda: setattr(w, 'running', False)
+        with patch('worker.signal.signal'), patch('worker.time.sleep'):
+            self.assertIsNone(w.run())
+        w.tap.assert_called_once_with(.5, .915, '報酬を受け取って一覧へ')
+        w.swipe.assert_called_once()
+        self.assertIn('saved reward battle', w.claimed_rewards)
+        self.assertTrue(any(call.args[0] == 'connection_recovered' for call in w.log.call_args_list))
+        self.assertEqual(json.loads(w.progress.path.read_text())['status'], 'stopped')
+
+    def test_start_tap_response_lost_still_counts_observed_battle_and_result(self):
+        w = self.worker
+        w.result_recorded = w.reward_recorded = True
+        self.rows = [self.row('バトル！', y=.84), self.row('バトルルール'),
+                     self.row('初回報酬', y=.4), self.row('ON', y=.92)]
+        w.tap.side_effect = WDAConnectionError('応答が途切れました')
+        with self.assertRaises(WDAConnectionError):
+            w.step()
+        self.assertFalse(w.result_recorded)
+        self.assertFalse(w.reward_recorded)
+        self.rows = [self.row('VS')]
+        w.step()
+        self.assertEqual(w.battles, 1)
+        self.assertEqual(w.new_battles, 1)
+        self.rows = [self.row('勝利', y=.2), self.row('タップですすむ', y=.91)]
+        w.tap.side_effect = None
+        w.step()
+        self.assertEqual(w.wins, 1)
 
 
 if __name__ == '__main__':

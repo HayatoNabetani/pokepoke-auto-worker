@@ -45,9 +45,24 @@ fi
 if [ ! -x "$POKEPOKE_OCR" ] || [ ocr.swift -nt "$POKEPOKE_OCR" ]; then
   xcrun swiftc -module-cache-path "$PWD/.runtime/swift-cache" ocr.swift -o "$POKEPOKE_OCR"
 fi
-if ! curl --max-time 3 -fsS http://127.0.0.1:8100/status >/dev/null 2>&1; then
+# Refresh a leftover forwarder from this checkout so code updates take effect.
+# Never terminate an unrelated service using the same port.
+for bridge_pid in $(lsof -nP -iTCP:8100 -sTCP:LISTEN -t 2>/dev/null | sort -u); do
+  bridge_command="$(ps -p "$bridge_pid" -o command= || true)"
+  bridge_cwd="$(lsof -a -p "$bridge_pid" -d cwd -Fn 2>/dev/null || true)"
+  if [[ "$bridge_command" == *"usb-forward.cjs"* ]] && [[ "$bridge_cwd" == *$'\n'"n$PWD" ]]; then
+    kill -TERM "$bridge_pid" 2>/dev/null || true
+    for attempt in $(seq 1 10); do
+      if ! kill -0 "$bridge_pid" 2>/dev/null; then break; fi
+      sleep .2
+    done
+  fi
+done
+if ! nc -z 127.0.0.1 8100 >/dev/null 2>&1; then
   "$NODE_BIN" usb-forward.cjs >logs/usb-forward.log 2>&1 &
   forward_pid=$!
+fi
+if ! curl --max-time 3 -fsS http://127.0.0.1:8100/status >/dev/null 2>&1; then
   if [ ! -f "$WDA_TESTRUN" ]; then
     echo "WebDriverAgentのxctestrunがありません。WDA_TESTRUNを指定してください。" >&2
     exit 1

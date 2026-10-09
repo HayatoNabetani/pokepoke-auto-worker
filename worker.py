@@ -317,6 +317,11 @@ class Worker:
             if self.limit and self.battles >= self.limit:
                 self.running = False
                 return 0
+            # The start tap can reach the phone even if its response is lost.
+            # Prepare result bookkeeping before sending it, then use the next
+            # screenshot to determine whether a battle actually began.
+            self.result_recorded = False
+            self.reward_recorded = False
             self.tap_text(battle, 'オート対戦開始')
             self.battles += 1
             self.new_battles += 1
@@ -583,13 +588,34 @@ class Worker:
     def run(self):
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'running', False))
         self.log('worker_started', limit=self.limit)
+        connection_failures = 0
         try:
             while self.running:
                 if not self.in_battle and self.exploration_actions >= 200:
                     raise RuntimeError('探索が進まないため停止しました。ログとscreen.pngを確認してください。')
                 if not self.in_battle:
                     self.exploration_actions += 1
-                time.sleep(self.step())
+                try:
+                    delay = self.step()
+                except WDAConnectionError as error:
+                    if not self.running:
+                        break
+                    connection_failures += 1
+                    if connection_failures >= 3:
+                        raise
+                    self.log('connection_recovery_wait', attempt=connection_failures,
+                             error=str(error))
+                    # Discard the captured screen and never replay the failed
+                    # request. step() verifies the app and reads a fresh frame.
+                    self.rows = []
+                    self.screen = None
+                    self.unknown_since = None
+                    time.sleep(2)
+                    continue
+                if connection_failures:
+                    self.log('connection_recovered', action='画面を再確認して続行')
+                    connection_failures = 0
+                time.sleep(delay)
         except KeyboardInterrupt:
             self.log('stopped_by_user')
         except WDAConnectionError as error:
