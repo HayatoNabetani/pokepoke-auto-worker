@@ -81,6 +81,30 @@ class Device:
 
     def activate(self):
         request('POST', self.prefix + '/wda/apps/activate', {'bundleId': APP_ID})
+        self.wait_foreground(starting=True)
+
+    def wait_foreground(self, timeout=15, starting=False):
+        """Wait through system overlays, without operating another app.
+
+        Return whether waiting occurred so callers can discard a stale capture.
+        The sessionless endpoint reports the on-screen app instead of preferring
+        the session's tested application.
+        """
+        deadline = time.monotonic() + timeout
+        waited = False
+        while True:
+            active = request('GET', '/wda/activeAppInfo')['value'].get('bundleId')
+            if active == APP_ID:
+                return waited
+            state = request('POST', self.prefix + '/wda/apps/state',
+                            {'bundleId': APP_ID})['value']
+            transient = active in (None, 'com.apple.springboard') and state == 4
+            if not starting and not transient:
+                raise RuntimeError(f'ポケポケ以外の画面のため停止しました（検出アプリ: {active or "不明"}、ポケポケ状態: {state}）。')
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f'ポケポケの前面表示を確認できませんでした（検出アプリ: {active or "不明"}、ポケポケ状態: {state}）。システムの通知やダイアログを確認してください。')
+            waited = True
+            time.sleep(.5)
 
 
 def prepare():

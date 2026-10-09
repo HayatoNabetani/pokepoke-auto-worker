@@ -133,6 +133,7 @@ class Worker:
             self.device.activate()
             self.log('device_unlocked')
             return 3
+        self.device.wait_foreground()
         live_path = ROOT / 'logs' / 'current.png'
         self.rows = observe(live_path)
         self.screen = Image.open(live_path).copy()
@@ -140,9 +141,9 @@ class Worker:
         if self.screen.size != (1206, 2622):
             raise RuntimeError('この実機で確認した画面サイズと異なるため停止しました。')
         # Do not send inputs outside the target app.
-        active = request('GET', self.prefix + '/wda/activeAppInfo')['value']
-        if active.get('bundleId') != 'jp.pokemon.pokemontcgp':
-            raise RuntimeError('ポケポケ以外の画面になったため停止しました。')
+        if self.device.wait_foreground():
+            # An overlay appeared during capture. Read a fresh frame next time.
+            return 2
 
         if self.find('対戦相手', ymax=.2) or self.find('VS', exact=True):
             if not self.in_battle:

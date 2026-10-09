@@ -41,7 +41,8 @@ class ExplorationTests(unittest.TestCase):
         patch('worker.ROOT', root).start()
         patch('worker.SESSION_FILE', Mock(read_text=Mock(return_value='test'))).start()
         patch('worker.request', return_value={'value': {'bundleId': 'jp.pokemon.pokemontcgp'}}).start()
-        patch('worker.Device', return_value=Mock(unlock=Mock(return_value=False))).start()
+        patch('worker.Device', return_value=Mock(unlock=Mock(return_value=False),
+                                               wait_foreground=Mock(return_value=False))).start()
         self.worker = Worker(0, 900)
         self.worker.tap = Mock()
         self.worker.swipe = Mock()
@@ -217,6 +218,19 @@ class ExplorationTests(unittest.TestCase):
         self.worker.step()
         self.worker.device.activate.assert_called_once()
         self.assertIsNone(self.worker.screen)
+
+    def test_overlay_during_capture_discards_frame_without_tapping(self):
+        self.rows = [self.row('でスタート', y=.84)]
+        self.worker.device.wait_foreground.side_effect = [False, True]
+        self.assertEqual(self.worker.step(), 2)
+        self.worker.tap.assert_not_called()
+
+    def test_other_app_stops_before_capture_and_tap(self):
+        self.worker.device.wait_foreground.side_effect = RuntimeError('別アプリ')
+        with self.assertRaisesRegex(RuntimeError, '別アプリ'):
+            self.worker.step()
+        self.assertIsNone(self.worker.screen)
+        self.worker.tap.assert_not_called()
 
     def test_unwinnable_battle_prevents_successful_completion(self):
         w = self.worker

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from device import Device, passcode_buttons
+from device import APP_ID, Device, passcode_buttons
 
 
 def keypad(label='パスコードを入力'):
@@ -91,6 +91,36 @@ class DeviceTests(unittest.TestCase):
     def test_keypad_requires_all_digits(self):
         with self.assertRaises(RuntimeError):
             passcode_buttons('<App label="パスコード"/>')
+
+    def test_game_mode_overlay_waits_until_target_is_detected(self):
+        self.request.side_effect = [{'value': {'bundleId': 'com.apple.springboard'}},
+                                    {'value': 4}, {'value': {'bundleId': APP_ID}}]
+        self.assertTrue(self.device.wait_foreground())
+        self.assertEqual(self.request.call_args_list[0].args, ('GET', '/wda/activeAppInfo'))
+        self.assertFalse(any(call.args[1].endswith('/wda/tap')
+                             for call in self.request.call_args_list))
+
+    def test_real_other_app_is_not_accepted_even_if_game_reports_foreground(self):
+        self.request.side_effect = [{'value': {'bundleId': 'other.app'}}, {'value': 4}]
+        with self.assertRaisesRegex(RuntimeError, 'other.app'):
+            self.device.wait_foreground()
+
+    def test_home_screen_does_not_count_as_game_overlay(self):
+        self.request.side_effect = [{'value': {'bundleId': 'com.apple.springboard'}}, {'value': 2}]
+        with self.assertRaisesRegex(RuntimeError, 'ポケポケ以外'):
+            self.device.wait_foreground()
+
+    def test_overlay_wait_has_a_timeout(self):
+        self.request.side_effect = [{'value': {'bundleId': 'com.apple.springboard'}}, {'value': 4}]
+        with self.assertRaisesRegex(RuntimeError, '前面表示を確認できません'):
+            self.device.wait_foreground(timeout=0)
+
+    def test_activate_does_not_finish_until_foreground_is_verified(self):
+        self.request.side_effect = [{'value': None}, {'value': {'bundleId': 'com.apple.springboard'}},
+                                    {'value': 2}, {'value': {'bundleId': APP_ID}}]
+        self.device.activate()
+        self.assertEqual(self.request.call_args_list[0].args[1], '/session/test/wda/apps/activate')
+        self.assertEqual(self.request.call_count, 4)
 
 
 if __name__ == '__main__':
