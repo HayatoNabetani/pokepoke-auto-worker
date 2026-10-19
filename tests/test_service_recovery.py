@@ -15,6 +15,7 @@ class ServiceRecoveryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         shutil.copy(Path(__file__).parents[1] / 'start.sh', self.root)
+        shutil.copy(Path(__file__).parents[1] / 'run_lock.py', self.root)
         (self.root / '.runtime').mkdir()
         (self.root / '.runtime/ocr').touch(mode=0o755)
         (self.root / 'wda.xctestrun').touch()
@@ -31,6 +32,9 @@ root = pathlib.Path(os.environ['TEST_ROOT'])
 args = sys.argv[1:]
 if args[0] == 'sync':
     raise SystemExit(0)
+if 'run_lock.py' in args:
+    index = args.index('run_lock.py')
+    os.execv(sys.executable, [sys.executable, str(root / 'run_lock.py'), *args[index + 1:]])
 if '-c' in args:
     print(0 if 'bool' in args[args.index('-c') + 1] or '--reset-progress' in args else 100)
     raise SystemExit(0)

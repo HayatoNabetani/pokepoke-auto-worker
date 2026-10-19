@@ -15,6 +15,9 @@ if ! command -v "$UV_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 uv_args=(run --locked)
+if [ "${POKEPOKE_LOCK_HELD:-}" != 1 ]; then
+  exec "$UV_BIN" run --locked python run_lock.py -- "$@"
+fi
 if [ -f .env ]; then
   chmod 600 .env
   uv_args+=(--env-file .env)
