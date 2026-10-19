@@ -59,7 +59,15 @@ class ConnectionTests(unittest.TestCase):
         self.open.assert_called_once()
 
     def test_wda_error_response_is_not_retried(self):
-        self.open.return_value = response({'error': 'invalid session id'})
+        self.open.return_value = response({'error': 'unknown command'})
         with self.assertRaises(RuntimeError):
             request('GET', '/session/test/source')
         self.open.assert_called_once()
+
+    def test_expired_session_requests_recovery_without_replaying_request(self):
+        body = io.BytesIO(json.dumps({'value': {'error': 'invalid session id'}}).encode())
+        self.open.side_effect = urllib.error.HTTPError('http://localhost', 404, 'missing', {}, body)
+        with self.assertRaisesRegex(WDAConnectionError, 'セッションが失効'):
+            request('POST', '/session/old/wda/tap', {'x': 10, 'y': 20})
+        self.open.assert_called_once()
+        self.sleep.assert_not_called()

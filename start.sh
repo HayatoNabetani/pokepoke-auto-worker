@@ -28,9 +28,23 @@ fi
 printf '%s\n' "$$" >.runtime/worker.pid
 forward_pid=""
 wda_pid=""
+stop_child() {
+  local child_pid="${1:-}"
+  if [ -n "$child_pid" ] && [ "$(ps -p "$child_pid" -o ppid= 2>/dev/null | tr -d ' ')" = "$$" ]; then
+    kill -TERM "$child_pid" 2>/dev/null || true
+    for attempt in $(seq 1 10); do
+      if ! kill -0 "$child_pid" 2>/dev/null; then break; fi
+      sleep .2
+    done
+    if [ "$(ps -p "$child_pid" -o ppid= 2>/dev/null | tr -d ' ')" = "$$" ]; then
+      kill -KILL "$child_pid" 2>/dev/null || true
+    fi
+    wait "$child_pid" 2>/dev/null || true
+  fi
+}
 cleanup() {
-  if [ -n "$forward_pid" ]; then kill "$forward_pid" 2>/dev/null || true; fi
-  if [ -n "$wda_pid" ]; then kill "$wda_pid" 2>/dev/null || true; fi
+  stop_child "$forward_pid"
+  stop_child "$wda_pid"
   rm -f .runtime/worker.pid
   rmdir .runtime/run.lock 2>/dev/null || true
 }
@@ -44,6 +58,12 @@ if [ "$(run_python -c 'import os; print(int(bool(os.getenv("IPHONE_PASSCODE"))))
 fi
 if [ ! -x "$POKEPOKE_OCR" ] || [ ocr.swift -nt "$POKEPOKE_OCR" ]; then
   xcrun swiftc -module-cache-path "$PWD/.runtime/swift-cache" ocr.swift -o "$POKEPOKE_OCR"
+fi
+ensure_services() {
+local force="${1:-0}"
+if [ "$force" = 1 ]; then
+  stop_child "$forward_pid"
+  forward_pid=""
 fi
 # Refresh a leftover forwarder from this checkout so code updates take effect.
 # Never terminate an unrelated service using the same port.
@@ -63,13 +83,16 @@ if ! nc -z 127.0.0.1 8100 >/dev/null 2>&1; then
   forward_pid=$!
 fi
 if ! curl --max-time 3 -fsS http://127.0.0.1:8100/status >/dev/null 2>&1; then
+  stop_child "$wda_pid"
+  wda_pid=""
   if [ ! -f "$WDA_TESTRUN" ]; then
     echo "WebDriverAgentのxctestrunがありません。WDA_TESTRUNを指定してください。" >&2
     exit 1
   fi
+  echo '{"event":"wda_runner_start"}'
   xcodebuild test-without-building -xctestrun "$WDA_TESTRUN" \
     -destination "id=$IPHONE_UDID" \
-    -resultBundlePath "$PWD/logs/wda-$(date +%Y%m%d-%H%M%S).xcresult" \
+    -resultBundlePath "$PWD/logs/wda-$(date +%Y%m%d-%H%M%S)-${recovery_attempt:-0}.xcresult" \
     >"$wda_log" 2>&1 &
   wda_pid=$!
   ready=0
@@ -89,5 +112,31 @@ if ! curl --max-time 3 -fsS http://127.0.0.1:8100/status >/dev/null 2>&1; then
     exit 1
   fi
 fi
-run_python device.py
-run_python worker.py "$@"
+}
+
+# Preserve one battle budget across child restarts; reset only on the first run.
+export POKEPOKE_RUN_BASELINE
+POKEPOKE_RUN_BASELINE="$(run_python -c 'import sys; from iphone import ROOT; from progress import ProgressFile; data = None if "--reset-progress" in sys.argv[1:] else ProgressFile(ROOT / ".runtime/progress.json").load(); print((data or {}).get("total_battles", 0))' "$@")"
+worker_args=("$@")
+ensure_services 0
+for recovery_attempt in 0 1 2 3; do
+  if run_python device.py && run_python worker.py "${worker_args[@]}"; then
+    exit 0
+  else
+    worker_status=$?
+  fi
+  if [ "$worker_status" -ne 75 ]; then exit "$worker_status"; fi
+  if [ "$recovery_attempt" -eq 3 ]; then
+    echo '接続サービスの再起動を3回試みましたが復旧できません。USB接続とiPhoneの許可を確認してください。進捗は保持しています。' >&2
+    exit 75
+  fi
+  echo "{\"event\":\"wda_service_restart\",\"attempt\":$((recovery_attempt + 1))}"
+  # Do not repeatedly reset a checkpoint the worker has just saved.
+  retained_args=()
+  for arg in "${worker_args[@]}"; do
+    if [ "$arg" != '--reset-progress' ]; then retained_args+=("$arg"); fi
+  done
+  worker_args=("${retained_args[@]}")
+  rm -f .wda-session
+  ensure_services 1
+done

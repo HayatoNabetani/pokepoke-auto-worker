@@ -18,6 +18,11 @@ class WDAConnectionError(ConnectionError):
     """Transport failure; a write may already have reached the device."""
 
 
+def missing_session(result):
+    value = result.get('value') if isinstance(result, dict) else None
+    return isinstance(value, dict) and value.get('error') == 'invalid session id'
+
+
 def read_only_request(method, path):
     return method == 'GET' or (method == 'POST' and path.endswith('/wda/apps/state'))
 
@@ -45,6 +50,13 @@ def request(method, path, payload=None):
                 result = json.load(response)
             break
         except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code == 404 and error.fp is not None:
+                try:
+                    details = json.load(error)
+                except (ValueError, OSError):
+                    details = None
+                if missing_session(details):
+                    raise WDAConnectionError('WebDriverAgentのセッションが失効しました。接続サービスから作り直します。') from None
             if not transport_failure(error):
                 raise
             if attempt + 1 == attempts:
@@ -57,6 +69,8 @@ def request(method, path, payload=None):
             print(json.dumps({'event': 'wda_read_retry', 'attempt': attempt + 1,
                               'delay_seconds': delay, 'error_type': type(error).__name__}), flush=True)
             time.sleep(delay)
+    if missing_session(result):
+        raise WDAConnectionError('WebDriverAgentのセッションが失効しました。接続サービスから作り直します。')
     if isinstance(result.get('value'), dict) and result['value'].get('error'):
         raise RuntimeError(json.dumps(result['value'], ensure_ascii=False))
     return result

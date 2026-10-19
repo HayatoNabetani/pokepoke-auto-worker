@@ -2,6 +2,7 @@
 """Run solo step-up battles using screenshot OCR and observed reward icons."""
 import argparse
 import json
+import os
 import re
 import signal
 import time
@@ -92,6 +93,10 @@ class Worker:
         if reset_progress:
             self.progress.reset()
         self.restore_progress()
+        self.run_baseline = int(os.getenv('POKEPOKE_RUN_BASELINE', str(self.previous_battles)))
+
+    def limit_reached(self):
+        return bool(self.limit and self.previous_battles + self.new_battles - self.run_baseline >= self.limit)
 
     def restore_progress(self):
         data = self.progress.load()
@@ -293,7 +298,7 @@ class Worker:
             self.unknown_since = None
             return 8
 
-        if self.limit and not self.in_battle and self.battles >= self.limit:
+        if not self.in_battle and self.limit_reached():
             if self.find('エキスパンション') and self.find('ステップアップ'):
                 self.log('battle_limit_reached')
                 self.running = False
@@ -314,7 +319,7 @@ class Worker:
                 return 1
             if not on:
                 raise RuntimeError('オートONを確認できないため、対戦を開始しませんでした。')
-            if self.limit and self.battles >= self.limit:
+            if self.limit_reached():
                 self.running = False
                 return 0
             # The start tap can reach the phone even if its response is lost.
@@ -621,7 +626,7 @@ class Worker:
         except WDAConnectionError as error:
             self.status = 'error'
             self.log('stopped_on_connection_error', error=str(error))
-            return 1
+            return 75  # start.sh can restart WDA and resume the checkpoint.
         except Exception as error:
             self.status = 'error'
             self.log('stopped_on_error', error=str(error))

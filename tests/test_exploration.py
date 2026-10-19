@@ -412,7 +412,7 @@ class ExplorationTests(unittest.TestCase):
         w.selected = 'last battle'
         w.step = Mock(side_effect=WDAConnectionError('接続が切れました'))
         with patch('worker.signal.signal'), patch('worker.time.sleep'):
-            self.assertEqual(w.run(), 1)
+            self.assertEqual(w.run(), 75)
         data = json.loads(w.progress.path.read_text())
         self.assertEqual(data['status'], 'error')
         self.assertEqual(data['total_battles'], 15)
@@ -462,6 +462,20 @@ class ExplorationTests(unittest.TestCase):
         w.tap.side_effect = None
         w.step()
         self.assertEqual(w.wins, 1)
+
+    def test_service_restart_preserves_total_battle_budget(self):
+        w = self.worker
+        w.previous_battles = 100
+        w.new_battles = 2
+        w.limit = 3
+        w.run_baseline = 100
+        w.save_progress()
+        with patch.dict('os.environ', {'POKEPOKE_RUN_BASELINE': '100'}):
+            resumed = self.restarted()
+        resumed.limit = 3
+        self.assertFalse(resumed.limit_reached())
+        resumed.new_battles = 1
+        self.assertTrue(resumed.limit_reached())
 
 
 if __name__ == '__main__':

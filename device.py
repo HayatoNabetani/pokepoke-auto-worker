@@ -4,7 +4,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 
-from iphone import ROOT, SESSION_FILE, request
+from iphone import ROOT, SESSION_FILE, request, WDAConnectionError
 
 APP_ID = 'jp.pokemon.pokemontcgp'
 ATTEMPT_FILE = ROOT / '.runtime' / 'unlock-attempted'
@@ -133,6 +133,9 @@ def prepare():
 if __name__ == '__main__':
     try:
         prepare()
+    except WDAConnectionError:
+        print('WebDriverAgentとの通信を確認できません。接続サービスの再起動を要求します。')
+        raise SystemExit(75)
     except Exception as error:
         # No traceback containing WDA responses or environment values.
         print('起動準備に失敗しました：' + (str(error) if isinstance(error, RuntimeError)
