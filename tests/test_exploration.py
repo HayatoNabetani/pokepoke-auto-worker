@@ -204,6 +204,37 @@ class ExplorationTests(unittest.TestCase):
             w.step()
         self.assertFalse(w.exhausted_expansions)
 
+    def test_real_title_split_inside_deck_word_can_be_selected(self):
+        self.rows = json.loads((FIXTURES / 'wrapped-battle-title.json').read_text())
+        w = self.worker
+        w.reward_color.return_value = .1
+        w.step()
+        titles = w.battle_rows()
+        self.assertEqual(len(titles), 1)
+        self.assertIn('exデッキ', titles[0]['text'])
+        self.assertNotIn('0/4', titles[0]['text'])
+        self.assertNotIn('F', titles[0]['text'])
+        last_line = self.rows[4]
+        self.assertAlmostEqual(titles[0]['y'] + titles[0]['height'] / 2,
+                               last_line['y'] + last_line['height'] / 2)
+        w.tap.assert_called_once()
+        self.assertIn('デッキ', w.selected)
+        self.assertEqual(w.deck_read_failures, 0)
+
+    def test_wrapped_title_does_not_merge_with_next_battle(self):
+        self.worker.rows = json.loads((FIXTURES / 'wrapped-battle-title.json').read_text())
+        self.worker.rows.append(self.row('別のデッキ', x=.65, y=.74))
+        titles = self.worker.battle_rows()
+        self.assertEqual(len(titles), 2)
+        self.assertNotIn('別の', titles[0]['text'])
+
+    def test_two_line_title_and_single_line_title_have_same_identity_text(self):
+        self.worker.rows = [self.row('ピカチュウデ', x=.65, y=.55),
+                            self.row('ッキ（テスト）', x=.65, y=.575)]
+        wrapped = self.worker.battle_rows()[0]['text']
+        self.worker.rows = [self.row('ピカチュウデッキ（テスト）', x=.65, y=.56)]
+        self.assertEqual(self.worker.battle_rows()[0]['text'], wrapped)
+
     def test_real_empty_battle_screen_is_saved_and_moves_to_next_expansion(self):
         w = self.worker
         identity = w.expansion_catalog.identify(screen_with_logo('expansion-ex'), {'y': .60}, 'Aシリーズ', 30)

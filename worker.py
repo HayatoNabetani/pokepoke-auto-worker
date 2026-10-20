@@ -219,6 +219,41 @@ class Worker:
         return sorted({normalized(r['text']) for r in self.rows
                        if r['y'] > .8 and normalized(r['text']).endswith('シリーズ')})
 
+    def battle_rows(self):
+        """Join adjacent title lines before searching for the word デッキ."""
+        candidates = []
+        for row in self.rows:
+            text = normalized(row['text'])
+            if not (.35 < row['x'] < .95 and .36 < row['y'] < .78):
+                continue
+            # Exclude challenge counts and small icon annotations such as F/EXP.
+            japanese = re.search(r'[\u3040-\u30ff\u3400-\u9fff]', text)
+            if japanese or (len(text) >= 3 and row.get('width', 0) > .1
+                            and any(c.isalpha() for c in text)):
+                candidates.append(row)
+        groups = []
+        for row in sorted(candidates, key=lambda r: (r['y'], r['x'])):
+            left = row['x'] - row.get('width', 0) / 2
+            if groups:
+                previous = groups[-1][-1]
+                previous_left = previous['x'] - previous.get('width', 0) / 2
+                if 0 < row['y'] - previous['y'] < .04 and abs(left - previous_left) < .06:
+                    groups[-1].append(row)
+                    continue
+            groups.append([row])
+        titles = []
+        for group in groups:
+            text = ''.join(row['text'] for row in group)
+            if 'デッキ' not in normalized(text):
+                continue
+            left = min(row['x'] - row.get('width', 0) / 2 for row in group)
+            right = max(row['x'] + row.get('width', 0) / 2 for row in group)
+            top = min(row['y'] - row['height'] / 2 for row in group)
+            bottom = max(row['y'] + row['height'] / 2 for row in group)
+            titles.append({'text': text, 'x': (left + right) / 2, 'y': (top + bottom) / 2,
+                           'width': right - left, 'height': bottom - top})
+        return titles
+
     def finish_expansion(self, reason='別エキスパンションを探す'):
         if self.expansion:
             self.exhausted_expansions.add(self.expansion)
@@ -435,8 +470,7 @@ class Worker:
             if self.find('この難易度のバトルはありません', ymin=.36, ymax=.8):
                 self.finish_expansion('この難易度のバトルがないため別エキスパンションを探す')
                 return 2
-            decks = [r for r in self.rows if 'デッキ' in normalized(r['text'])
-                     and r['x'] > .35 and .36 < r['y'] < .72]
+            decks = self.battle_rows()
             if not decks:
                 self.deck_read_failures += 1
                 if self.deck_read_failures >= 3:
