@@ -328,6 +328,12 @@ class Worker:
             # An overlay appeared during capture. Read a fresh frame next time.
             return 2
 
+        # Results can still contain a VS heading. Handle them before deciding
+        # that the battle is in progress or checking its time limit.
+        finish = self.handle_result()
+        if finish is not None:
+            return finish
+
         if self.find('対戦相手', ymax=.2) or self.find('VS', exact=True):
             if not self.in_battle:
                 self.in_battle = True
@@ -352,11 +358,6 @@ class Worker:
             if resume:
                 self.tap_text(resume, '中断された対戦を再開')
                 return 3
-
-        # Results and rewards are handled here once their observed labels are known.
-        finish = self.handle_result()
-        if finish is not None:
-            return finish
 
         if self.in_battle:
             if time.monotonic() - self.battle_since > self.timeout:
@@ -624,10 +625,20 @@ class Worker:
         return 5
 
     def handle_result(self):
+        if self.find('デッキを見直して再挑戦') and self.find('レンタルデッキ'):
+            close = (self.find('X', ymin=.65, ymax=.85, exact=True)
+                     or self.find('×', ymin=.65, ymax=.85, exact=True)
+                     or self.find('✕', ymin=.65, ymax=.85, exact=True))
+            if close:
+                self.tap_text(close, '敗戦後のおすすめデッキ通知を閉じる')
+                return 2
         advance = self.find('タップですすむ', ymin=.85)
-        victory = self.find('勝利', ymax=.35)
-        defeat = self.find('敗北', ymax=.35)
-        if advance and (victory or defeat or self.result_recorded):
+        victory = self.find('勝利', ymax=.35) or self.find('勝ち', ymax=.35)
+        defeat = self.find('敗北', ymax=.35) or self.find('負け', ymax=.35)
+        next_button = self.find('次へ', ymin=.8, exact=True)
+        no_rewards = self.find('獲得した報酬はありません')
+        continue_button = advance or (next_button if no_rewards else None)
+        if continue_button and (victory or defeat or self.result_recorded):
             if not self.result_recorded:
                 self.result_recorded = True
                 self.in_battle = False
@@ -639,9 +650,11 @@ class Worker:
                     if self.failed[self.selected] >= 2:
                         self.unresolved_rewards.add(self.selected)
                 self.log('battle_result', outcome='win' if victory else 'loss', selected=self.selected)
-            self.tap_text(advance, '対戦結果の続きへ')
+            self.tap_text(continue_button, '報酬のない対戦結果から一覧へ' if no_rewards and not advance else '対戦結果の続きへ')
+            if no_rewards and not advance:
+                self.list_fingerprint = None
+                self.list_stalls = 0
             return 2
-        next_button = self.find('次へ', ymin=.8, exact=True)
         if next_button and self.find('プレイヤー経験値'):
             self.in_battle = False
             if self.find('初回報酬') and not self.reward_recorded:

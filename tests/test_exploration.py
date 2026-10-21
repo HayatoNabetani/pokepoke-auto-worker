@@ -280,6 +280,77 @@ class ExplorationTests(unittest.TestCase):
             w.screen.paste(icon, (int(1206 * .08), int(2622 * .915)))
         self.assertTrue(w.home_navigation_visible())
 
+    def test_loss_label_advances_and_records_defeat_once(self):
+        w = self.worker
+        w.in_battle = True
+        w.battle_since = time.monotonic()
+        w.selected = 'スイクンexデッキ'
+        self.rows = [self.row('VS スイクンexデッキ（未知なる水域）', y=.22),
+                     self.row('VS', y=.22),
+                     self.row('負け…', y=.26), self.row('タップですすむ', y=.91)]
+        w.step()
+        self.assertFalse(w.in_battle)
+        self.assertTrue(w.result_recorded)
+        self.assertEqual(w.failed[w.selected], 1)
+        self.assertEqual(w.wins, 0)
+        w.step()
+        self.assertEqual(w.failed[w.selected], 1)
+        self.assertEqual(w.tap.call_count, 2)
+
+    def test_win_label_advances_and_records_win_once(self):
+        w = self.worker
+        w.in_battle = True
+        w.battle_since = time.monotonic()
+        self.rows = [self.row('勝ち！', y=.26), self.row('タップですすむ', y=.91)]
+        w.step()
+        w.step()
+        self.assertEqual(w.wins, 1)
+        self.assertFalse(w.in_battle)
+
+    def test_loss_result_restored_after_restart_advances_without_waiting_for_battle(self):
+        self.worker.in_battle = True
+        self.worker.selected = 'saved loss battle'
+        self.worker.save_progress()
+        w = self.restarted()
+        self.rows = [self.row('負け…', y=.26), self.row('タップですすむ', y=.91)]
+        w.step()
+        w.tap.assert_called_once_with(.5, .91, '対戦結果の続きへ')
+        self.assertEqual(w.failed['saved loss battle'], 1)
+        self.assertFalse(w.resume_battle)
+
+    def test_no_reward_loss_page_advances_without_double_counting_loss(self):
+        w = self.worker
+        w.result_recorded = True
+        w.selected = 'saved loss battle'
+        w.failed[w.selected] = 1
+        w.list_stalls = 2
+        self.rows = [self.row('負け', y=.26), self.row('獲得した報酬はありません'),
+                     self.row('次へ', y=.915)]
+        w.step()
+        w.tap.assert_called_once_with(.5, .915, '報酬のない対戦結果から一覧へ')
+        self.assertEqual(w.failed[w.selected], 1)
+        self.assertEqual(w.list_stalls, 0)
+        self.assertFalse(w.claimed_rewards)
+
+    def test_restart_on_no_reward_page_records_missing_defeat_once(self):
+        w = self.worker
+        w.selected = 'saved loss battle'
+        self.rows = [self.row('負け', y=.26), self.row('獲得した報酬はありません'),
+                     self.row('次へ', y=.915)]
+        w.step()
+        w.step()
+        self.assertEqual(w.failed[w.selected], 1)
+        self.assertEqual(w.wins, 0)
+
+    def test_loss_deck_recommendation_is_dismissed_without_changing_deck(self):
+        self.rows = [self.row('デッキを見直して再挑戦してみましょう', y=.41),
+                     self.row('「レンタルデッキ」で挑戦してみましょう', y=.46),
+                     self.row('マイデッキへ', x=.28, y=.69),
+                     self.row('レンタルデッキへ', x=.72, y=.69),
+                     self.row('X', y=.765)]
+        self.worker.step()
+        self.worker.tap.assert_called_once_with(.5, .765, '敗戦後のおすすめデッキ通知を閉じる')
+
     def test_real_empty_battle_screen_is_saved_and_moves_to_next_expansion(self):
         w = self.worker
         identity = w.expansion_catalog.identify(screen_with_logo('expansion-ex'), {'y': .60}, 'Aシリーズ', 30)
