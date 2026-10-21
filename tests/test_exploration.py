@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -234,6 +235,50 @@ class ExplorationTests(unittest.TestCase):
         wrapped = self.worker.battle_rows()[0]['text']
         self.worker.rows = [self.row('ピカチュウデッキ（テスト）', x=.65, y=.56)]
         self.assertEqual(self.worker.battle_rows()[0]['text'], wrapped)
+
+    def test_ranked_lobby_returns_home_instead_of_starting_online_battle(self):
+        self.rows = [self.row('ランクマッチ', y=.12), self.row('シーズン戦績', y=.885),
+                     self.row('バトル！', y=.78)]
+        w = self.worker
+        saved = ('上級', 'Aシリーズ', 0)
+        w.exhausted_expansions.add(saved)
+        w.step()
+        w.tap.assert_called_once_with(.125, .932, 'ホーム画面へ戻ってひとりでバトルを再開')
+        self.assertEqual(w.exhausted_expansions, {saved})
+        self.assertTrue(w.resume_navigation_needed)
+        self.assertEqual(w.battles, 0)
+
+    def test_unknown_screen_with_home_icon_can_recover_after_timeout(self):
+        self.worker.unknown_since = time.monotonic() - 61
+        self.worker.home_navigation_visible = Mock(return_value=True)
+        self.rows = [self.row('未対応のメニュー')]
+        self.assertEqual(self.worker.step(), 3)
+        self.worker.tap.assert_called_once()
+        self.assertIsNone(self.worker.unknown_since)
+
+    def test_home_recovery_is_bounded(self):
+        self.rows = [self.row('ランクマッチ', y=.12), self.row('シーズン戦績', y=.885)]
+        self.worker.step()
+        self.worker.step()
+        with self.assertRaisesRegex(RuntimeError, '復帰を2回'):
+            self.worker.step()
+        self.assertEqual(self.worker.tap.call_count, 2)
+
+    def test_ranked_lobby_detection_does_not_interrupt_an_observed_battle(self):
+        w = self.worker
+        w.in_battle = True
+        w.battle_since = time.monotonic()
+        self.rows = [self.row('ランクマッチ', y=.12), self.row('シーズン戦績', y=.885)]
+        w.step()
+        w.tap.assert_not_called()
+
+    def test_home_icon_detection_rejects_blank_frame(self):
+        w = self.worker
+        w.screen = Image.new('RGB', (1206, 2622), 'white')
+        self.assertFalse(w.home_navigation_visible())
+        with Image.open(Path(__file__).parents[1] / 'assets' / 'home-navigation.png') as icon:
+            w.screen.paste(icon, (int(1206 * .08), int(2622 * .915)))
+        self.assertTrue(w.home_navigation_visible())
 
     def test_real_empty_battle_screen_is_saved_and_moves_to_next_expansion(self):
         w = self.worker

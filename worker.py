@@ -45,6 +45,7 @@ class Worker:
         self.in_battle = False
         self.battle_since = None
         self.unknown_since = None
+        self.home_recoveries = 0
         self.selected = None
         self.failed = {}
         self.list_fingerprint = None
@@ -219,6 +220,36 @@ class Worker:
         return sorted({normalized(r['text']) for r in self.rows
                        if r['y'] > .8 and normalized(r['text']).endswith('シリーズ')})
 
+    def home_navigation_visible(self):
+        width, height = self.screen.size
+        icon = self.screen.crop((int(width * .08), int(height * .915),
+                                 int(width * .17), int(height * .95)))
+        with Image.open(Path(__file__).parent / 'assets' / 'home-navigation.png') as template:
+            expected = np.asarray(template.convert('L').resize((32, 32)), dtype=float)
+        actual = np.asarray(icon.convert('L').resize((32, 32)), dtype=float)
+        expected -= expected.mean()
+        actual -= actual.mean()
+        denominator = np.linalg.norm(expected) * np.linalg.norm(actual)
+        return bool(actual.std() > 10 and denominator > 0
+                    and np.sum(actual * expected) / denominator > .85)
+
+    def return_home(self, reason):
+        if self.home_recoveries >= 2:
+            raise RuntimeError('ホームからの復帰を2回試みても探索を続けられませんでした。screen.pngを確認してください。')
+        self.home_recoveries += 1
+        self.unknown_since = None
+        self.resume_difficulty = self.difficulty
+        self.resume_series = self.expansion_series
+        self.resume_navigation_needed = True
+        self.series_initialized = False
+        self.series_needs_selection = False
+        self.needs_expansion_alignment = False
+        self.pending_dismiss = False
+        self.resume_fingerprint = self.list_fingerprint = self.expansion_fingerprint = None
+        self.resume_stalls = self.list_stalls = self.expansion_stalls = 0
+        self.log('returning_to_home', reason=reason, attempt=self.home_recoveries)
+        self.tap(.125, .932, 'ホーム画面へ戻ってひとりでバトルを再開')
+
     def battle_rows(self):
         """Join adjacent title lines before searching for the word デッキ."""
         candidates = []
@@ -332,6 +363,10 @@ class Worker:
                 raise RuntimeError('対戦が制限時間を超えました。画面を確認してください。')
             self.unknown_since = None
             return 8
+
+        if self.find('ランクマッチ', ymax=.3) and self.find('シーズン戦績', ymin=.8):
+            self.return_home('ランクマッチの待機画面から探索へ戻る')
+            return 3
 
         if not self.in_battle and self.limit_reached():
             if self.find('エキスパンション') and self.find('ステップアップ'):
@@ -582,6 +617,9 @@ class Worker:
             self.unknown_since = time.monotonic()
             self.log('waiting_for_known_screen', text=[r['text'] for r in self.rows])
         elif time.monotonic() - self.unknown_since > 60:
+            if self.home_navigation_visible():
+                self.return_home('未対応画面が続いたためホームから復帰')
+                return 3
             raise RuntimeError('未対応の画面が60秒続いたため停止しました。screen.pngを確認してください。')
         return 5
 
