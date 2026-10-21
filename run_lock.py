@@ -93,16 +93,37 @@ def start(handle, args):
         print('自動操作は既に実行中です。停止する場合は bash stop.sh を実行してください。', file=sys.stderr)
         return 1
     env = {**os.environ, 'POKEPOKE_LOCK_HELD': '1'}
-    child = subprocess.Popen(['bash', str(ROOT / 'start.sh'), *args], cwd=ROOT,
-                             env=env, start_new_session=True, close_fds=True)
+    child = None
+    interrupted = False
+    interrupt_deadline = None
 
     def interrupt(*_):
-        if child.poll() is None:
+        nonlocal interrupted, interrupt_deadline
+        interrupted = True
+        if interrupt_deadline is None:
+            interrupt_deadline = time.monotonic() + 5
+        # Popen.poll() can deadlock if a signal interrupts Popen.wait() while
+        # its internal waitpid lock is held. Only use OS signaling here.
+        if child is not None:
             terminate(child.pid)
 
     signal.signal(signal.SIGINT, interrupt)
     signal.signal(signal.SIGTERM, interrupt)
+    child = subprocess.Popen(['bash', str(ROOT / 'start.sh'), *args], cwd=ROOT,
+                             env=env, start_new_session=True, close_fds=True)
+    if interrupted:
+        terminate(child.pid)
     try:
+        # A shell can defer TERM while a foreground program is starting. Keep
+        # shutdown bounded even if that child never handles the first signal.
+        while child.poll() is None:
+            if interrupt_deadline is not None and time.monotonic() >= interrupt_deadline:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                break
+            time.sleep(.1)
         code = child.wait()
         return code if code >= 0 else 128 - code
     finally:
